@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments and secrets
+.venv*/
+venv/
+.env
+.env.*
+!.env.example
+
+# Downloaded or generated research artifacts
+data/
+checkpoints/
+outputs/
+third_party/
+wandb/
+runs/
+
+# Large model, cache, dataset, and media files
+*.safetensors
+*.pt
+*.pth
+*.pth.tar
+*.ckpt
+*.npy
+*.npz
+*.parquet
+*.hdf5
+*.tar
+*.tar.gz
+*.zip
+*.mp4
+*.avi
+*.mov
+
+# Local diagnostics and rendered reports
+*.log
+outputs_*.log
+view_*.html
+CURRENT_RESEARCH_HANDOFF.md
+research_handoff_*.md
+
+# Editor / OS metadata
+.DS_Store
+.idea/
+.vscode/
+*~
