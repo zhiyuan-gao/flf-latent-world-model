@@ -1,6 +1,6 @@
 # Latent world model 实验总结
 
-更新时间：2026-08-04 11:29（Europe/Berlin）
+更新时间：2026-08-04 12:39（Europe/Berlin）
 项目目录：本仓库根目录
 
 ## 1. 文档范围
@@ -68,7 +68,7 @@
 | S2 | Single-step 100/task，旧 encoder | stride 1, joint visual+proprio | epoch 16 手动停止 | 0.7337（epoch 4） | epoch 16 train 51.27%，val 0.26% | encoder 错配确认后停止；仍是明显过拟合 |
 | N1 | Native-256 joint | 100/task, stride 1, `z+s+a -> z'+s'` | 完成 25 epochs | 0.72595（epoch 5） | final train 72.71%，val 2.21% | 真正 native-256 仍未通过泛化 gate |
 | N2 | Native-256 visual-only target | 保留 `s_t` 输入，不预测 `s_{t+4}` | 完成 25 epochs | 0.72548（epoch 6） | final train 72.90%，val 2.46% | 删除 future proprio target 基本无影响 |
-| N3 | Native-256 no-proprio | 仅 `z_t + 4 actions -> z_{t+4}` | **运行中，1/25 epochs** | 0.8450（暂定） | epoch 1 train/val 均为 0% | 检验 current proprio 是否形成训练捷径 |
+| N3 | Native-256 no-proprio | 仅 `z_t + 4 actions -> z_{t+4}` | **运行中，11/25 epochs** | 0.72564（epoch 5，暂定） | epoch 11 train 17.09%，val 0.32% | 前 11 epochs 与 N1/N2 基本重合，继续跑满协议 |
 
 \* E4 改变了 latent geometry 和 loss，`0.79153` 不能与 E3 的 raw-latent normalized
 error 作严格数值比较；可比较的 temporal retrieval 仍然失败。
@@ -263,16 +263,40 @@ target: z_{t+4}
 80,476,224。它与 N2 的唯一关键差别是删除 `s_t` condition，用来判断 current proprio
 是否帮助模型记忆训练轨迹或形成 shortcut。
 
-运行状态（截至本文更新时间）：
+运行状态（截至 2026-08-04 12:39 CEST）：
 
 - 2026-08-04 11:21:39 启动；
 - 227,408 train / 22,139 validation windows，1,777 steps/epoch；
-- 两张 A40 已进入 99--100% utilization，约 7.15 GiB/GPU；
+- 已完成 11/25 epochs 和 19,547/44,425 optimizer steps（44%），epoch 12 正在运行；
+- 两张 A40 utilization 为 100%/99%，显存均约 7.15 GiB；
 - 上游 N2 completion validation 通过，`upstream_status=complete`；
-- epoch 1 已完成：train norm 0.8423、train future_closer 0%，val norm 0.8450、
-  val future_closer 0%、correct beats shuffle 77.4%；该单点只证明运行正常，不能用于
-  判断最终消融结果；
-- 预计约 2 小时 50 分钟完成 25 epochs。
+- epoch 5 和 epoch 10 checkpoint 已正常保存；
+- 按当前每 epoch 约 6.71 分钟的速度，预计 14:10 CEST 左右完成。
+
+当前学习曲线：
+
+| Epoch | Global step | Train norm | Train future_closer | Val norm | Val future_closer | Val dynamic future_closer | Val correct beats shuffle |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1,777 | 0.84227 | 0.00% | 0.84496 | 0.00% | 0.00% | 77.37% |
+| 5 | 8,885 | 0.68596 | 0.00% | **0.72564** | 0.00% | 0.00% | 89.16% |
+| 10 | 17,770 | 0.59866 | 12.16% | 0.74802 | 0.44% | 0.92% | 87.81% |
+| 11 | 19,547 | 0.58267 | 17.09% | 0.75402 | 0.32% | 0.66% | 87.94% |
+
+截至 epoch 11，最佳 validation normalized error 出现在 epoch 5。之后 train norm 和
+train future_closer 持续改善，而 validation norm 已开始回升，validation
+future_closer 仍低于 0.5%。它已经表现出与 N1/N2 相同的 train 拟合、validation
+时间推进不足趋势。
+
+三组实验在相同 epoch 11 的直接对照如下：
+
+| 实验 | Train norm | Train future_closer | Val norm | Val future_closer | Val dynamic future_closer | Val correct beats shuffle |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| N1：联合预测 visual + proprio | 0.58053 | 17.38% | 0.75398 | 0.42% | 0.88% | 87.40% |
+| N2：只预测 visual，输入 current proprio | 0.58132 | 18.21% | 0.75548 | 0.44% | 0.93% | 88.06% |
+| N3：只预测 visual，完全无 proprio | 0.58267 | 17.09% | 0.75402 | 0.32% | 0.66% | 87.94% |
+
+三条曲线到 epoch 11 几乎重合。当前证据说明删除 current proprio 尚未改善泛化，也没有
+破坏 action sensitivity；最终判断以 N3 完成 25 epochs 后的同协议比较为准。
 
 第一次自动 launch 曾因 `pgrep -f` 把 tmux server 的历史 command line 误判为残留
 trainer 而退出；当时没有产生 history 或 checkpoint。idle detector 已改为扫描
@@ -324,8 +348,8 @@ DROID 训练的 V-JEPA2-AC world model，不是 RoboCasa365 训练实验。
    为 action token 完全失效；但 action sensitivity 仍不足以证明 learned dynamics 可用。
 7. **删除 future proprio target 无实质影响。** N1/N2 几乎相同，辅助 state head 不是
    当前视觉失败的原因。
-8. **current proprio input 是否形成 shortcut 尚未回答。** N3 是当前最直接的 controlled
-   ablation，必须等其完成再决定下一步。
+8. **current proprio input 暂未表现为主要 shortcut。** N3 到 epoch 11 与 N1/N2 的
+   train/validation 曲线和 action sensitivity 基本重合；完整结论仍以 epoch 25 为准。
 
 ## 10. N3 完成后的决策规则
 
@@ -355,7 +379,7 @@ self-rollout、residual policy 或 CEM 正式训练。
 
 - native-256 feature cache；
 - N1、N2 的 `history.json`、`summary.json`、日志和 epoch 5/10/15/20/25 checkpoints；
-- N3 的 live log、queue context，后续按相同 checkpoint 周期保存；
+- N3 的 live log、queue context，以及 epoch 5/10 checkpoints，后续按相同周期保存；
 - 本文以及两个详细实验协议文档。
 
 为释放磁盘已永久删除：
