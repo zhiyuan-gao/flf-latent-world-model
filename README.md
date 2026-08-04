@@ -1,73 +1,177 @@
-# FLF Latent World Model for RoboCasa365
+# RoboCasa365 潜空间世界模型
 
-Research code for an action-conditioned latent world model in a hierarchical
-RoboCasa365 video-guided policy. The current model predicts a frozen visual
-representation four control steps into the future:
-
-```text
-(z_t, optional s_t, a_t, a_{t+1}, a_{t+2}, a_{t+3}) -> z_{t+4}
-```
-
-The repository contains data preparation, frozen-encoder feature extraction,
-predictor training/evaluation, progress-tracking utilities, controlled
-proprioception ablations, tests, and detailed experiment records. It does
-**not** contain datasets, model weights, feature caches, third-party sources,
-or trained checkpoints.
-
-> Status: experimental. The reported predictors beat the copy-current
-> persistence baseline on average, but have not yet passed the held-out
-> future-closeness gate required for residual-policy or CEM use. See
-> [`LATENT_WORLD_MODEL_EXPERIMENT_SUMMARY.md`](LATENT_WORLD_MODEL_EXPERIMENT_SUMMARY.md).
-
-## Current benchmark
-
-- Tasks: `PreSoakPan`, `KettleBoiling`, `LoadDishwasher`, `RinseSinkBasin`
-- Data: RoboCasa365 target-human Composite-Seen demonstrations
-- Camera: `robot0_agentview_left`
-- Control rate: 20 Hz
-- Model transition: four actions / 0.2 seconds
-- Visual encoder: frozen V-JEPA2 ViT-g/16, native 256 checkpoint
-- Visual grid: FP16 `16 x 16 x 1408`, with no pooling or PCA
-- Predictor: width 960, depth 7, 12 heads, approximately 80.5M parameters
-- Formal training: two GPUs, global batch 128, 25 epochs
-
-Human300 is the 300-task **pretraining** dataset. It is useful for later
-large-scale experiments, but it does not replace the four target-human task
-snapshots used by the reported controlled experiments.
-
-## Repository layout
+本仓库用于训练 action-conditioned latent world model，并接入 RoboCasa365
+子任务视频引导的闭环策略。当前 predictor 学习以下四步状态转移：
 
 ```text
-configs/                  portable fixed split metadata
-scripts/                  preparation, extraction, training, and evaluation CLIs
-src/dynamics/             datasets, encoders, predictors, losses, and metrics
-src/progress/             video/progress localization modules
-tests/                    CPU regression tests
-*.md                      protocols, results, and resource manifests
+(z_t, [可选] s_t, a_t, a_{t+1}, a_{t+2}, a_{t+3}) -> z_{t+4}
 ```
 
-Local/generated directories such as `data/`, `checkpoints/`, `outputs/`,
-`third_party/`, and `.venv*` are intentionally ignored by Git.
+## 1. 克隆仓库
 
-## 1. Hardware and storage
+```bash
+git clone git@github.com:zhiyuan-gao/flf-latent-world-model.git
+cd flf-latent-world-model
+```
 
-The code is developed on Linux with Python 3.10, PyTorch 2.5.1 + CUDA 12.4,
-and two NVIDIA A40 GPUs. Feature extraction and formal training can use two
-GPUs, while unit tests and small audits can run on CPU.
+## 2. 当前实验配置
 
-Recommended free space:
+| 项目 | 设置 |
+| --- | --- |
+| RoboCasa365 任务 | `PreSoakPan`、`KettleBoiling`、`LoadDishwasher`、`RinseSinkBasin` |
+| 相机视角 | `robot0_agentview_left` |
+| 控制频率 | 20 Hz |
+| 预测目标 | `t -> t+4`，对应 0.2 秒 |
+| 动作 token | 4 个有顺序的 12 维 token |
+| V-JEPA2 特征 | FP16 `[16,16,1408]` |
+| 预测器 | 宽度 960、深度 7、12 个注意力头，约 80.5M 参数 |
+| 训练 | 2 张 GPU、全局 batch 128、25 个 epoch |
 
-| Configuration | Recommended free space |
-| --- | ---: |
-| Four-task data, weights, and V-JEPA2 cache | at least 300 GiB |
-| V-JEPA2 and DINOv3 caches together | at least 400 GiB |
+## 3. 硬件与磁盘
 
-The measured native V-JEPA2 train/validation cache is 172.27 GiB. A planned
-DINOv3 cache is estimated at about 125.29 GiB.
+已验证环境：
 
-## 2. Python environment for latent dynamics
+- Linux；
+- Python 3.10；
+- PyTorch 2.5.1 + CUDA 12.4；
+- 2×NVIDIA A40；
+- V-JEPA2 正式 cache 约 172.27 GiB；
+- V-JEPA2 全流程建议准备至少 300 GiB 可用空间；
+- 同时保存 V-JEPA2 与 DINOv3 cache 建议准备至少 400 GiB。
 
-Create an isolated environment. Do not install into the system Python:
+开始前检查：
+
+```bash
+python3 --version
+nvidia-smi
+df -h .
+```
+
+## 4. 数据
+
+### 4.1 四任务 target-human 数据
+
+下载以下 RoboCasa365 target-human snapshots：
+
+| 任务 | 数据版本 | 轨迹数 | 帧数 |
+| --- | --- | ---: | ---: |
+| `PreSoakPan` | `20250809` | 501 | 395,501 |
+| `KettleBoiling` | `20250814` | 501 | 228,349 |
+| `LoadDishwasher` | `20250811` | 501 | 369,430 |
+| `RinseSinkBasin` | `20250816` | 509 | 211,036 |
+
+目录结构：
+
+```text
+data/robocasa365/v1.0/target/composite/
+├── PreSoakPan/20250809/lerobot/
+├── KettleBoiling/20250814/lerobot/
+├── LoadDishwasher/20250811/lerobot/
+└── RinseSinkBasin/20250816/lerobot/
+```
+
+合计应有 2,012 个 Parquet episodes、6,036 个 MP4 和 1,204,316 帧。官方 Box
+下载命令和数据完整性检查见
+[`SECOND_SERVER_RESOURCE_SETUP.md`](SECOND_SERVER_RESOURCE_SETUP.md)。
+
+### 4.2 Human300
+
+Human300 用于后续扩大任务和场景覆盖的预训练实验。按照 RoboCasa365 官方
+`pretrain_human300` 配置保存数据，并将其与四任务 target-human 数据分别管理。
+
+- 官方文档：<https://robocasa.ai/docs/build/html/benchmarking/multitask_learning.html>
+- 数据来源：RoboCasa365 Human300 pretraining dataset
+
+## 5. 模型权重
+
+先安装 Hugging Face 下载工具：
+
+```bash
+python3 -m venv .venv-download
+source .venv-download/bin/activate
+python -m pip install --upgrade pip huggingface_hub
+hf auth login
+```
+
+### 5.1 V-JEPA2 ViT-g/16 native 256
+
+当前正式 latent world model 使用：
+
+- 模型仓库：`facebook/vjepa2-vitg-fpc64-256`
+- 固定版本：`875c192b7b704b87d1e1d99345769632dd5f739a`
+- `model.safetensors` SHA-256：
+  `f205e77aa2ade168db6b09d4bc420d156141f64ab964278a9c181a2bdf2a232b`
+
+```bash
+mkdir -p checkpoints/vjepa2-vitg-fpc64-256
+
+hf download facebook/vjepa2-vitg-fpc64-256 \
+  README.md config.json model.safetensors video_preprocessor_config.json \
+  --revision 875c192b7b704b87d1e1d99345769632dd5f739a \
+  --local-dir checkpoints/vjepa2-vitg-fpc64-256
+
+sha256sum checkpoints/vjepa2-vitg-fpc64-256/model.safetensors
+```
+
+预处理固定为短边 resize 到 292，再中心裁剪到 256×256，输出
+`16×16×1408` patch-token grid。
+
+### 5.2 DINOv3 ViT-L/16
+
+DINOv3 用于相同数据、split、视角和 predictor 下的 encoder 对照实验：
+
+- 模型仓库：`facebook/dinov3-vitl16-pretrain-lvd1689m`
+- 固定版本：`ea8dc2863c51be0a264bab82070e3e8836b02d51`
+- `model.safetensors` SHA-256：
+  `dcb2e45127cccbf1601e5f42fef165eea275c8e5213197e8dcf3f48822718179`
+
+```bash
+mkdir -p checkpoints/dinov3-vitl16-pretrain-lvd1689m
+
+hf download facebook/dinov3-vitl16-pretrain-lvd1689m \
+  README.md LICENSE.md config.json model.safetensors preprocessor_config.json \
+  --revision ea8dc2863c51be0a264bab82070e3e8836b02d51 \
+  --local-dir checkpoints/dinov3-vitl16-pretrain-lvd1689m
+
+sha256sum checkpoints/dinov3-vitl16-pretrain-lvd1689m/model.safetensors
+```
+
+DINOv3 表征协议为 256×256 输入、256 个 patch tokens、FP16
+`16×16×1024`；CLS 与 4 个 register tokens 单独处理。
+
+### 5.3 GR00T N1.5 Composite-Seen checkpoint
+
+GR00T 用作完整研究框架中的 Base VLA 和候选 action 生成器：
+
+- 模型仓库：`robocasa/robocasa365_checkpoints`
+- 固定版本：`14895998fe7c8f8f2441cc8957ec2c510302758b`
+- 权重子目录：
+  `gr00t_n1-5/foundation_model_learning/target_posttraining/composite_seen/checkpoint-60000`
+
+```bash
+export GR00T_REPO_DIR=checkpoints/robocasa365_checkpoints
+export GR00T_PREFIX=gr00t_n1-5/foundation_model_learning/target_posttraining/composite_seen/checkpoint-60000
+
+mkdir -p "$GR00T_REPO_DIR"
+
+hf download robocasa/robocasa365_checkpoints \
+  "$GR00T_PREFIX/config.json" \
+  "$GR00T_PREFIX/experiment_cfg/metadata.json" \
+  "$GR00T_PREFIX/model.safetensors.index.json" \
+  "$GR00T_PREFIX/model-00001-of-00002.safetensors" \
+  "$GR00T_PREFIX/model-00002-of-00002.safetensors" \
+  --revision 14895998fe7c8f8f2441cc8957ec2c510302758b \
+  --local-dir "$GR00T_REPO_DIR"
+
+mkdir -p checkpoints/gr00t_n1-5_composite_seen_target_posttraining
+ln -s "$(pwd)/$GR00T_REPO_DIR/$GR00T_PREFIX" \
+  checkpoints/gr00t_n1-5_composite_seen_target_posttraining/checkpoint-60000
+```
+
+五个文件的 SHA-256 见
+[`SECOND_SERVER_RESOURCE_SETUP.md`](SECOND_SERVER_RESOURCE_SETUP.md)。
+
+## 6. 潜空间动力学 Python 环境
 
 ```bash
 python3.10 -m venv .venv-dynamics
@@ -81,7 +185,7 @@ python -m pip install \
 python -m pip install -r requirements-dynamics.txt
 ```
 
-Verify the installation:
+验证环境：
 
 ```bash
 python - <<'PY'
@@ -91,117 +195,76 @@ import pandas
 import torch
 import transformers
 
-print("torch", torch.__version__, "CUDA runtime", torch.version.cuda)
-print("CUDA available", torch.cuda.is_available(), "GPUs", torch.cuda.device_count())
+print("torch", torch.__version__)
+print("CUDA runtime", torch.version.cuda)
+print("CUDA available", torch.cuda.is_available())
+print("GPU count", torch.cuda.device_count())
 print("transformers", transformers.__version__)
 PY
 
 python -m pytest -q
 ```
 
-`flash-attn`, RoboCasa, robosuite, and Isaac-GR00T are not required when
-training a predictor from an existing feature cache.
+## 7. RoboCasa + GR00T 环境
 
-## 3. Required datasets
+完整模拟和 Base VLA 使用以下源码 revision：
 
-Download these four official RoboCasa365 target-human snapshots:
-
-| Task | Snapshot | Episodes | Frames |
-| --- | --- | ---: | ---: |
-| PreSoakPan | `20250809` | 501 | 395,501 |
-| KettleBoiling | `20250814` | 501 | 228,349 |
-| LoadDishwasher | `20250811` | 501 | 369,430 |
-| RinseSinkBasin | `20250816` | 509 | 211,036 |
-
-Expected layout:
-
-```text
-data/robocasa365/v1.0/target/composite/
-├── PreSoakPan/20250809/lerobot/
-├── KettleBoiling/20250814/lerobot/
-├── LoadDishwasher/20250811/lerobot/
-└── RinseSinkBasin/20250816/lerobot/
-```
-
-The four datasets total 2,012 Parquet episodes, 6,036 MP4 files, and
-1,204,316 frames. Exact official download commands, Box identifiers, and a
-read-only integrity checker are in
-[`SECOND_SERVER_RESOURCE_SETUP.md`](SECOND_SERVER_RESOURCE_SETUP.md).
-
-The optional Human300 dataset belongs under a separate pretraining path; do
-not point the four-task target manifest at Human300.
-
-## 4. Required and optional model weights
-
-### V-JEPA2: required for the current experiment
-
-- Hugging Face repo: `facebook/vjepa2-vitg-fpc64-256`
-- Revision: `875c192b7b704b87d1e1d99345769632dd5f739a`
-- `model.safetensors` SHA-256:
-  `f205e77aa2ade168db6b09d4bc420d156141f64ab964278a9c181a2bdf2a232b`
-- Expected model path: `checkpoints/vjepa2-vitg-fpc64-256/`
-
-```bash
-hf download facebook/vjepa2-vitg-fpc64-256 \
-  README.md config.json model.safetensors video_preprocessor_config.json \
-  --revision 875c192b7b704b87d1e1d99345769632dd5f739a \
-  --local-dir checkpoints/vjepa2-vitg-fpc64-256
-```
-
-Do not use `vjepa2-vitg-fpc64-384` with a forced 256 crop. That historical
-configuration produced a mislabeled cache and is not comparable to the
-native-256 results.
-
-### DINOv3: optional planned encoder ablation
-
-- Hugging Face repo: `facebook/dinov3-vitl16-pretrain-lvd1689m`
-- Revision: `ea8dc2863c51be0a264bab82070e3e8836b02d51`
-- `model.safetensors` SHA-256:
-  `dcb2e45127cccbf1601e5f42fef165eea275c8e5213197e8dcf3f48822718179`
-- Expected model path: `checkpoints/dinov3-vitl16-pretrain-lvd1689m/`
-
-DINOv3 is gated on Hugging Face. Accept its license and authenticate before
-downloading. The intended representation is the 256 patch tokens only,
-reshaped to FP16 `16 x 16 x 1024`; exclude the CLS token and four register
-tokens. The repository does not yet provide the finalized DINOv3 extractor or
-dimension-metadata changes, so this checkpoint is not a drop-in replacement
-for a V-JEPA2 cache.
-
-### GR00T N1.5: optional Base VLA / later planning experiments
-
-- Hugging Face repo: `robocasa/robocasa365_checkpoints`
-- Subdirectory:
-  `gr00t_n1-5/foundation_model_learning/target_posttraining/composite_seen/checkpoint-60000`
-- Revision: `14895998fe7c8f8f2441cc8957ec2c510302758b`
-- Expected model path:
-  `checkpoints/gr00t_n1-5_composite_seen_target_posttraining/checkpoint-60000/`
-
-Only the two Safetensors shards, index, config, and experiment metadata are
-needed. Exact file checksums are in `SECOND_SERVER_RESOURCE_SETUP.md`.
-
-## 5. Optional simulator and Base-VLA source dependencies
-
-These repositories are required only for RoboCasa simulation, Base GR00T
-inference, and closed-loop policy experiments. Check out the pinned revisions:
-
-| Component | Revision |
+| 组件 | 固定版本 |
 | --- | --- |
 | `robocasa/robocasa` | `b4684e6ee37d377cc392e98302a6b916d588b415` |
 | `ARISE-Initiative/robosuite` | `5ce6643f3092639d08f7b0f90ed1c6a84f50552c` |
 | `NVIDIA/Isaac-GR00T` | `9d7d7a9eb7ad30bd8ce30448d9ab53a918b45b10` |
 | `facebookresearch/vjepa2` | `204698b45b3712590f06245fbfba32d3be539812` |
 
-Place them under `third_party/`. RoboCasa simulation additionally needs the
-official kitchen asset packs and a generated `macros_private.py`. See
-[`MVP_INSTALL_MANIFEST.md`](MVP_INSTALL_MANIFEST.md) for the verified runtime
-boundary. The original combined runtime used Python 3.10.16, PyTorch
-2.5.1+cu124, and flash-attn 2.7.4.post1.
+```bash
+mkdir -p third_party
 
-## 6. Reproduce the fixed data split
+git clone https://github.com/ARISE-Initiative/robosuite.git third_party/robosuite
+git -C third_party/robosuite checkout 5ce6643f3092639d08f7b0f90ed1c6a84f50552c
 
-The checked-in split file stores the exact 100 train / 10 validation / 20
-locked-test episode IDs per task used by the native-256 experiments. Generate
-portable manifests and small action/state episode caches on the new machine:
+git clone https://github.com/robocasa/robocasa.git third_party/robocasa
+git -C third_party/robocasa checkout b4684e6ee37d377cc392e98302a6b916d588b415
+
+git clone https://github.com/NVIDIA/Isaac-GR00T.git third_party/Isaac-GR00T
+git -C third_party/Isaac-GR00T checkout 9d7d7a9eb7ad30bd8ce30448d9ab53a918b45b10
+
+git clone https://github.com/facebookresearch/vjepa2.git third_party/vjepa2
+git -C third_party/vjepa2 checkout 204698b45b3712590f06245fbfba32d3be539812
+```
+
+建立环境并安装：
+
+```bash
+python3.10 -m venv .venv-robocasa-gr00t
+source .venv-robocasa-gr00t/bin/activate
+python -m pip install --upgrade pip
+
+python -m pip install \
+  torch==2.5.1 torchvision==0.20.1 \
+  --index-url https://download.pytorch.org/whl/cu124
+
+python -m pip install flash-attn==2.7.4.post1 --no-build-isolation
+python -m pip install -e third_party/robosuite
+python -m pip install -e third_party/robocasa
+python -m pip install -e third_party/Isaac-GR00T
+```
+
+配置 RoboCasa 并下载 kitchen assets：
+
+```bash
+python -m robocasa.scripts.setup_macros
+python -m robocasa.scripts.download_kitchen_assets
+```
+
+已验证的组合环境使用 Python 3.10.16、PyTorch 2.5.1+cu124 和
+flash-attn 2.7.4.post1。详细安装记录见
+[`MVP_INSTALL_MANIFEST.md`](MVP_INSTALL_MANIFEST.md)。
+
+## 8. 生成固定数据划分
+
+仓库中的
+`configs/robocasa365_four_task_split_100.json` 保存了正式实验使用的每任务
+100 train / 10 validation / 20 test episode IDs。
 
 ```bash
 source .venv-dynamics/bin/activate
@@ -217,13 +280,17 @@ python scripts/prepare_checkvla_predictor_data.py \
   --reference-manifest configs/robocasa365_four_task_split_100.json
 ```
 
-Expected window counts are 227,408 train, 22,139 validation, and 43,469 locked
-test windows. Training and model selection must not read the test split.
+预期生成：
 
-## 7. Extract native V-JEPA2 features
+- 227,408 train windows；
+- 22,139 validation windows；
+- 43,469 test windows。
 
-Extract train and validation only. The following example assigns two tasks to
-each GPU and can be run in two terminals:
+训练与模型选择使用 train/validation；test 在实验方案冻结后评估。
+
+## 9. 提取 V-JEPA2 特征缓存
+
+两张 GPU 分别处理两个任务：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python scripts/extract_endpoint_predictor_features.py \
@@ -241,14 +308,16 @@ CUDA_VISIBLE_DEVICES=1 python scripts/extract_endpoint_predictor_features.py \
   --splits train val --device cuda:0 --batch-size 8
 ```
 
-The completed cache should contain 440 episode pairs and 256,587 frame rows.
-Metadata must report `vjepa2-vitg-fpc64-256`, crop size 256, and observed
-feature shape `[16,16,1408]`. Alternatively, transfer the verified 172.27 GiB
-cache from an existing machine.
+正式 cache 应包含：
 
-## 8. Train the current single-step predictor
+- 440 个 train/validation episode feature pairs；
+- 256,587 个 frame rows；
+- FP16 `[N,16,16,1408]`；
+- metadata 中记录 native-256 checkpoint、crop size 256 和 feature shape。
 
-Twenty-step two-GPU smoke test:
+## 10. 训练预测器
+
+先运行 20-step 双卡 smoke：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.run \
@@ -264,7 +333,7 @@ CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.run \
   --output-dir outputs/single_step_dynamics/smoke_no_proprio
 ```
 
-Formal completely proprio-free run:
+正式 no-proprio run：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.run \
@@ -280,34 +349,10 @@ CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.run \
   --output-dir outputs/single_step_dynamics/formal_native256_no_proprio_seed_0
 ```
 
-Remove `--no-proprio-input` to retain current proprioception as a condition.
-Remove both no-proprio flags and add `--proprio-weight 0.005` for joint visual
-and future-proprio supervision.
+带 current proprio condition 的视觉预测 run 使用
+`--no-proprio-target`。联合预测 visual 与 future proprio 的 run 使用
+`--proprio-weight 0.005`。
 
-## 9. Evaluation rules
+## 11. 许可证
 
-Use complete held-out validation and report:
-
-- normalized error relative to copy-current persistence;
-- overall and visually dynamic `future_closer`;
-- visual-delta cosine and RMS ratio;
-- correct action versus zero and far same-task shuffled action;
-- per-task metrics and the train/validation gap.
-
-A normalized error below one is not sufficient. Do not use a checkpoint for
-residual-policy training or CEM unless held-out predictions actually advance
-toward the future while remaining action-sensitive.
-
-## Documentation
-
-- [`LATENT_WORLD_MODEL_EXPERIMENT_SUMMARY.md`](LATENT_WORLD_MODEL_EXPERIMENT_SUMMARY.md): chronological results and decisions
-- [`SINGLE_STEP_DYNAMICS_EXPERIMENT.md`](SINGLE_STEP_DYNAMICS_EXPERIMENT.md): current one-step protocol
-- [`ENDPOINT_PREDICTOR_EXPERIMENT.md`](ENDPOINT_PREDICTOR_EXPERIMENT.md): direct endpoint and causal multi-time experiments
-- [`SECOND_SERVER_RESOURCE_SETUP.md`](SECOND_SERVER_RESOURCE_SETUP.md): exact downloads, checksums, and storage planning
-- [`MVP_INSTALL_MANIFEST.md`](MVP_INSTALL_MANIFEST.md): simulator/Base-VLA installation record
-
-## License
-
-Project-owned code is released under the MIT License. Downloaded datasets,
-weights, assets, and third-party repositories retain their own licenses and
-are not redistributed here.
+项目代码采用 MIT 许可证。
